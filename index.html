@@ -257,9 +257,9 @@ select { height: 40px; min-width: 0; max-width: 64%; border-radius: 8px; border:
     <p class="mode" id="hmode"></p>
     <details class="conn" id="conn"><summary>Google Sheet connection</summary>
       <div class="cbody">
-        <input class="q2" id="cu" type="url" placeholder="Web app URL (https://script.google.com/...)" aria-label="Web app URL" autocomplete="off">
-        <input class="q2" id="ct" type="password" placeholder="Passcode" aria-label="Passcode" autocomplete="off">
-        <div class="ha"><button type="button" id="cs">Connect</button><button type="button" id="cd">Disconnect</button></div>
+        <input class="q2" id="cu" type="text" placeholder="Paste the setup link, or the web app URL" aria-label="Setup link or web app URL" autocomplete="off" autocapitalize="off" autocorrect="off">
+        <input class="q2" id="ct" type="text" placeholder="Passcode (not needed if you pasted the setup link)" aria-label="Passcode" autocomplete="off" autocapitalize="off" autocorrect="off">
+        <div class="ha"><button type="button" id="cs">Connect</button><button type="button" id="cc">Copy setup link</button><button type="button" id="cd">Disconnect</button></div>
         <p class="mode" id="cmsg"></p>
       </div></details>
     <div id="hlist"></div>
@@ -719,7 +719,7 @@ function renderHist() {
   const on = store.mode === 'sheet';
   $('hmode').textContent = (on ? 'Saved to your Google Sheet, so every device sees the same list.' : 'Saved on this device only. Open “Google Sheet connection” below to sync across devices.') + (store.err ? ' ' + store.err : '');
   if (sheet.hidden) return;
-  $('cd').hidden = !on;
+  $('cd').hidden = !on; $('cc').hidden = !on;
   const list = $('hlist'); list.textContent = '';
   if (!store.items.length) {
     const n = document.createElement('div'); n.className = 'none'; n.textContent = store.ready ? 'No draws saved yet. Each finished draw is added here automatically.' : 'Loading…';
@@ -775,12 +775,19 @@ function renderHist() {
   } else list.append(Object.assign(mk('p', 'mode', 'Showing all ' + total), { style: 'text-align:center' }));
 }
 $('cs').onclick = async () => {
-  const u = $('cu').value.trim(), t = $('ct').value.trim(), msg = $('cmsg');
-  if (!/^https:\/\/script\.google\.com\//.test(u) || !t) { msg.textContent = 'Paste the web app URL (starts with https://script.google.com/) and the passcode.'; return; }
+  let u = $('cu').value.trim(), t = $('ct').value.trim(), msg = $('cmsg');
+  const m = u.indexOf('#');
+  if (m >= 0) { try { const h = new URLSearchParams(u.slice(m + 1)); u = h.get('u') || ''; t = h.get('t') || t; } catch (e) { u = ''; } }
+  if (!/^https:\/\/script\.google\.com\//.test(u) || !t) { msg.textContent = 'Paste the full setup link, or the web app URL (starts with https://script.google.com/) plus the passcode.'; return; }
   msg.textContent = 'Connecting…';
   try { await store.connect(u, t); msg.textContent = 'Connected.'; $('cu').value = ''; $('ct').value = ''; }
   catch (e) { msg.textContent = 'Could not connect: ' + (e.message === 'auth' ? 'wrong passcode.' : 'check the URL and that the web app is deployed for “Anyone”.'); }
   renderHist();
+};
+$('cc').onclick = () => {
+  if (!store.cfg) return;
+  copyText(location.origin + location.pathname + '#u=' + encodeURIComponent(store.cfg.u) + '&t=' + encodeURIComponent(store.cfg.t));
+  $('cmsg').textContent = 'Setup link copied. Paste it into the same box on another device or in the home-screen app. Keep it private, it contains your passcode.';
 };
 $('cd').onclick = () => { store.disconnect(); $('cmsg').textContent = 'Disconnected. History on this device stays, the Sheet is untouched.'; };
 window.addEventListener('online', () => { if (store.cfg) store.sync(); });

@@ -255,6 +255,7 @@ select { height: 40px; min-width: 0; max-width: 64%; border-radius: 8px; border:
   <div class="in">
     <header><h2>History</h2><button type="button" class="close" id="hx" aria-label="Close history">×</button></header>
     <p class="mode" id="hmode"></p>
+    <div class="ha"><button type="button" id="hs">Sync now</button></div>
     <details class="conn" id="conn"><summary>Google Sheet connection</summary>
       <div class="cbody">
         <input class="q2" id="cu" type="text" placeholder="Paste the setup link, or the web app URL" aria-label="Setup link or web app URL" autocomplete="off" autocapitalize="off" autocorrect="off">
@@ -389,6 +390,7 @@ function render(groups, mode) {
       inp.value = labels[g.o] || ''; inp.placeholder = 'Option ' + String.fromCharCode(65 + g.o);
       inp.setAttribute('aria-label', 'Name of option ' + String.fromCharCode(65 + g.o));
       inp.addEventListener('input', () => { labels[g.o] = inp.value; });
+      inp.addEventListener('input', persistSoon);
       inp.addEventListener('change', () => { if (draw && curId && saved) persistCurrent(); });
       h.append(tag, inp);
     } else {
@@ -529,6 +531,7 @@ async function startDraw() {
   labels = labels.slice(0, S.opts);
   draw = makeDraw();
   curId = newId(); curTs = Date.now(); curNote = ''; saved = false;
+  persistCurrent();
   window.scrollTo(0, 0);
   const my = ++dealId; lock(true);
   render(draw, REDUCE ? 'none' : 'all');
@@ -546,7 +549,6 @@ async function startDraw() {
   await sleep(750);
   if (my !== dealId) return;
   $('pile').classList.remove('on'); lock(false);
-  persistCurrent();
 }
 
 /* one more card, taken from what is left of the deck, added to the group where its button was tapped */
@@ -588,7 +590,7 @@ const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } ca
   } catch (e) {}
 })();
 const store = {
-  cfg: lsGet(CFG_KEY, null), items: [], total: 0, shown: PAGE, ready: false, err: '', flushing: false,
+  cfg: lsGet(CFG_KEY, null), items: [], total: 0, shown: PAGE, ready: false, err: '', flushing: null,
   get mode() { return this.cfg ? 'sheet' : 'local'; },
   saveLocal() { lsSet(LOCAL_KEY, this.items.slice(0, 200)); },
   async api(q, body) {
@@ -599,13 +601,22 @@ const store = {
     if (!j.ok) throw new Error(j.error || 'error');
     return j;
   },
-  async flush() {
-    if (this.flushing || !this.cfg) return;
-    this.flushing = true;
-    try {
-      let ob = lsGet(OUT_KEY, []);
-      while (ob.length) { await this.api(null, ob[0]); ob.shift(); lsSet(OUT_KEY, ob); }
-    } finally { this.flushing = false; }
+  pending() { return lsGet(OUT_KEY, []).length; },
+  flush() {
+    if (!this.cfg) return Promise.resolve();
+    if (this.flushing) return this.flushing;
+    const p = (async () => {
+      for (;;) {
+        const ob = lsGet(OUT_KEY, []);
+        if (!ob.length) break;
+        await this.api(null, ob[0]);
+        const cur = lsGet(OUT_KEY, []); cur.shift(); lsSet(OUT_KEY, cur);
+      }
+    })();
+    this.flushing = p;
+    const done = () => { if (this.flushing === p) this.flushing = null; };
+    p.then(done, done);
+    return p;
   },
   enqueue(op) {
     if (!this.cfg) return;
@@ -620,7 +631,9 @@ const store = {
     try {
       await this.flush();
       const j = await this.api({ action: 'list', offset: 0, limit: 40 });
-      this.items = j.items; this.total = j.total; this.err = ''; this.saveLocal();
+      const have = new Set(j.items.map(x => x.id)), waiting = [];
+      lsGet(OUT_KEY, []).forEach(op => { if (op.action === 'put' && !have.has(op.entry.id)) { const { text, ...en } = op.entry; waiting.push(en); } });
+      this.items = j.items.concat(waiting).sort((a, b) => b.ts - a.ts); this.total = j.total + waiting.length; this.err = ''; this.saveLocal();
     } catch (e) { this.err = 'Could not reach the Sheet. Showing what is saved on this device.'; }
     this.ready = true; renderHist();
   },
@@ -653,10 +666,10 @@ const store = {
     this.saveLocal(); renderHist();
     this.enqueue({ action: 'put', entry: Object.assign({}, e, { text: entryText(e) }) });
   },
-  async patch(id, p) {
+  async patch(id, p, quiet) {
     let merged = null;
     this.items = this.items.map(x => { if (x.id !== id) return x; merged = Object.assign({}, x, p); return merged; });
-    this.saveLocal(); renderHist();
+    this.saveLocal(); if (!quiet) renderHist();
     if (merged) this.enqueue({ action: 'patch', id, p: Object.assign({}, p, { text: entryText(merged) }) });
   },
   async del(id) {
@@ -675,6 +688,8 @@ function entryFrom() {
     })),
   };
 }
+let pst;
+function persistSoon() { clearTimeout(pst); pst = setTimeout(() => { if (draw && curId && saved) persistCurrent(); }, 800); }
 async function persistCurrent() {
   if (!draw || !curId) return;
   const e = entryFrom();
@@ -717,8 +732,11 @@ function entryText(e) {
 function renderHist() {
   const sheet = $('hist');
   const on = store.mode === 'sheet';
-  $('hmode').textContent = (on ? 'Saved to your Google Sheet, so every device sees the same list.' : 'Saved on this device only. Open “Google Sheet connection” below to sync across devices.') + (store.err ? ' ' + store.err : '');
+  $('hmode').textContent = (on ? 'Saved to your Google Sheet, so every device sees the same list.' : 'Saved on this device only. Open “Google Sheet connection” below to sync across devices.') + (on && store.pending() ? ' ' + store.pending() + ' change(s) still waiting to upload.' : '') + (store.err ? ' ' + store.err : '');
   if (sheet.hidden) return;
+  $('hs').hidden = !on;
+  const ae = document.activeElement;
+  if (ae && ae.tagName === 'TEXTAREA' && $('hlist').contains(ae)) return;
   $('cd').hidden = !on; $('cc').hidden = !on;
   const list = $('hlist'); list.textContent = '';
   if (!store.items.length) {
@@ -747,7 +765,9 @@ function renderHist() {
     });
     const ta = document.createElement('textarea'); ta.className = 'hn'; ta.id = 'note-' + e.id; ta.value = e.note || '';
     ta.placeholder = 'What happened? Outcome or notes'; ta.setAttribute('aria-label', 'Outcome or notes for this draw');
-    ta.addEventListener('change', () => { if (e.id === curId) curNote = ta.value; store.patch(e.id, { note: ta.value }); });
+    let tmr;
+    ta.addEventListener('input', () => { if (e.id === curId) curNote = ta.value; clearTimeout(tmr); tmr = setTimeout(() => store.patch(e.id, { note: ta.value }, true), 700); });
+    ta.addEventListener('change', () => { clearTimeout(tmr); if (e.id === curId) curNote = ta.value; store.patch(e.id, { note: ta.value }, true); });
     art.append(ta);
     const ha = document.createElement('div'); ha.className = 'ha';
     const open = document.createElement('button'); open.type = 'button'; open.textContent = 'Open'; open.addEventListener('click', () => loadEntry(e));
@@ -790,7 +810,10 @@ $('cc').onclick = () => {
   $('cmsg').textContent = 'Setup link copied. Paste it into the same box on another device or in the home-screen app. Keep it private, it contains your passcode.';
 };
 $('cd').onclick = () => { store.disconnect(); $('cmsg').textContent = 'Disconnected. History on this device stays, the Sheet is untouched.'; };
+$('hs').onclick = async () => { const b = $('hs'); b.textContent = 'Syncing…'; await store.sync(); b.textContent = 'Sync now'; };
 window.addEventListener('online', () => { if (store.cfg) store.sync(); });
+document.addEventListener('visibilitychange', () => { if (!document.hidden && store.cfg) store.sync(); });
+window.addEventListener('pagehide', () => { if (store.cfg) store.flush().catch(() => {}); });
 function openHist() { $('hist').hidden = false; renderHist(); $('hist').scrollTop = 0; }
 function closeHist() { $('hist').hidden = true; }
 $('histBtn').onclick = openHist;
@@ -931,7 +954,8 @@ $('perMinus').onclick = () => { S.per = Math.max(1, S.per - 1); changed(); };
 $('perPlus').onclick = () => { S.per = Math.min(MAX_PER, S.per + 1); changed(); };
 $('revBox').onchange = e => { S.rev = e.target.checked; save(); };
 $('jumpBox').onchange = e => { S.jump = e.target.checked; save(); };
-$('q').addEventListener('change', () => { if (draw && curId && saved) persistCurrent(); });
+$('q').addEventListener('input', () => { if (S.mode === 'enter') persistSoon(); });
+$('q').addEventListener('change', () => { if (S.mode === 'enter' && draw && curId && saved) persistCurrent(); });
 $('draw').onclick = startDraw;
 
 /* ---------- copy ---------- */
